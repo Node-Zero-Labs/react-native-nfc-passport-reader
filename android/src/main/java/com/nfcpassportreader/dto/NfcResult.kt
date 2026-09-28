@@ -12,4 +12,7 @@ data class NfcResult(
   var mrz: String? = null,
   var nationality: String? = null,
   var originalFacePhoto: NfcImage? = null,
+  // Raw on-chip EF.DG1/EF.SOD file bytes (hex), needed to reconstruct/verify the passport off-device.
+  var dg1Hex: String? = null,
+  var sodHex: String? = null,
 )

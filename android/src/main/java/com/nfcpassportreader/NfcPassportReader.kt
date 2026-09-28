@@ -13,6 +13,7 @@ import org.jmrtd.lds.icao.DG11File
 import org.jmrtd.lds.icao.DG1File
 import org.jmrtd.lds.icao.DG2File
 import org.jmrtd.lds.iso19794.FaceImageInfo
+import java.io.ByteArrayInputStream
 
 class NfcPassportReader(context: Context) {
   private val bitmapUtil = BitmapUtil(context)
@@ -68,9 +69,15 @@ class NfcPassportReader(context: Context) {
 
     val nfcResult = NfcResult()
 
-    val dg1In = service.getInputStream(PassportService.EF_DG1)
-    val dg1File = DG1File(dg1In)
+    // Captured before parsing so the returned hex is the exact chip bytes (needed for
+    // downstream SOD hash/signature verification), not JMRTD's re-encoded representation.
+    val dg1Bytes = service.getInputStream(PassportService.EF_DG1).readBytes()
+    val dg1File = DG1File(ByteArrayInputStream(dg1Bytes))
     val mrzInfo = dg1File.mrzInfo
+    nfcResult.dg1Hex = dg1Bytes.toHexString()
+
+    val sodBytes = service.getInputStream(PassportService.EF_SOD).readBytes()
+    nfcResult.sodHex = sodBytes.toHexString()
 
     val dg11In = service.getInputStream(PassportService.EF_DG11)
     val dg11File = DG11File(dg11In)

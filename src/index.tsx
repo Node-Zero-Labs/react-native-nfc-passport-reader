@@ -37,6 +37,8 @@ export type NfcResult = {
   mrz: string;
   nationality: string;
   originalFacePhoto?: string; // base64
+  dg1Hex?: string; // raw EF.DG1 file bytes, hex-encoded
+  sodHex?: string; // raw EF.SOD file bytes, hex-encoded
 };
 export default class NfcPassportReader {
   static startReading(params: StartReadingParams): Promise<NfcResult> {

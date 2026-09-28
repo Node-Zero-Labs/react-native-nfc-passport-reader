@@ -52,7 +52,7 @@ class NfcPassportReader: NSObject {
 
       let mrzKey = passportUtil.getMRZKey()
 
-      var tags: [DataGroupId] = [.COM, .DG1, .DG11]
+      var tags: [DataGroupId] = [.COM, .DG1, .DG11, .SOD]
 
       if includeImages ?? false {
         tags.append(.DG2)
@@ -95,6 +95,14 @@ class NfcPassportReader: NSObject {
             "mrz": passport.passportMRZ,
             "nationality": passport.nationality,
           ]
+
+          // Raw on-chip EF.DG1/EF.SOD file bytes (hex), needed to reconstruct/verify the passport off-device.
+          if let dg1 = passport.dataGroupsRead[.DG1]?.data {
+            result["dg1Hex"] = binToHexRep(dg1).lowercased()
+          }
+          if let sod = passport.dataGroupsRead[.SOD]?.data {
+            result["sodHex"] = binToHexRep(sod).lowercased()
+          }
 
           if includeImages ?? false {
             if let passportImage = passport.passportImage,
