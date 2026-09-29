@@ -16,6 +16,7 @@ const NfcPassportReaderNativeModule = NativeNfcPassportReader
 enum NfcPassportReaderEvent {
   TAG_DISCOVERED = 'onTagDiscovered',
   NFC_STATE_CHANGED = 'onNfcStateChanged',
+  READ_RETRY = 'onReadRetry',
 }
 export type StartReadingParams = {
   bacKey: {
@@ -61,6 +62,13 @@ export default class NfcPassportReader {
       this.addListener(NfcPassportReaderEvent.NFC_STATE_CHANGED, callback);
     }
   }
+  // Fired when a read attempt fails with a recoverable error (e.g. brief RF
+  // misalignment) and the native side is retrying instead of failing the scan.
+  static addOnReadRetryListener(callback: (message: string) => void) {
+    if (Platform.OS === 'android') {
+      this.addListener(NfcPassportReaderEvent.READ_RETRY, callback);
+    }
+  }
   static isNfcEnabled(): Promise<boolean> {
     if (Platform.OS === 'android') {
       return NfcPassportReaderNativeModule.isNfcEnabled();
@@ -93,6 +101,9 @@ export default class NfcPassportReader {
       );
       DeviceEventEmitter.removeAllListeners(
         NfcPassportReaderEvent.NFC_STATE_CHANGED
+      );
+      DeviceEventEmitter.removeAllListeners(
+        NfcPassportReaderEvent.READ_RETRY
       );
     }
   }

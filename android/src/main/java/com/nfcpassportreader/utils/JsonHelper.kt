@@ -61,8 +61,11 @@ class NfcImageSerializer : JsonSerializer<NfcImage> {
     typeOfSrc: Type?,
     context: JsonSerializationContext?
   ): JsonElement {
-    if (src == null) return JsonNull.INSTANCE
+    val bitmap = src?.bitmap ?: return JsonNull.INSTANCE
 
-    return JsonPrimitive(src.base64)
+    // Some chips store the face image as JPEG2000, which RN's <Image> can't decode even
+    // though the JS side always labels it as image/jpeg. Re-encode the already-decoded
+    // bitmap as JPEG here so the base64 payload always matches that label.
+    return JsonPrimitive(bitmap.toBase64())
   }
 }

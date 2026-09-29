@@ -2,18 +2,15 @@ package com.nfcpassportreader
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.nfc.NfcAdapter
-import android.nfc.Tag
 import android.nfc.tech.IsoDep
-import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
@@ -21,12 +18,11 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.nfcpassportreader.utils.JsonToReactMap
 import com.nfcpassportreader.utils.serializeToMap
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import net.sf.scuba.smartcards.CardServiceException
 import org.jmrtd.BACKey
 import org.jmrtd.BACKeySpec
 import org.jmrtd.lds.icao.MRZInfo
@@ -42,6 +38,7 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
   private var bacKey: BACKeySpec? = null
   private var includeImages = false
   private var isReading = false
+  private var retryCount = 0
   private val jsonToReactMap = JsonToReactMap()
   private var _promise: Promise? = null
   private val inputDateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -85,83 +82,83 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
   }
 
   override fun onHostResume() {
-    try {
-      adapter?.let {
-        reactApplicationContext.currentActivity?.let { activity ->
-          val intent = Intent(activity, activity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-          }
-
-          val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent
-              .getActivity(
-                activity, 0,
-                intent,
-                PendingIntent.FLAG_MUTABLE
-              )
-          } else {
-            PendingIntent
-              .getActivity(
-                activity, 0,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT
-              )
-          }
-
-          val filter = arrayOf(arrayOf("android.nfc.tech.IsoDep"))
-
-          it.enableForegroundDispatch(
-            activity,
-            pendingIntent,
-            null,
-            filter
-          )
-        } ?: run {
-          Log.e("NfcPassportReader", "CurrentActivity is null")
-        }
-      } ?: run {
-        Log.e("NfcPassportReader", "NfcAdapter is null")
-      }
-    } catch (e: Exception) {
-      Log.e("NfcPassportReader", e.message ?: "Unknown Error")
-    }
   }
 
   override fun onHostPause() {
+    disableReaderMode()
   }
 
   override fun onHostDestroy() {
-    adapter?.disableForegroundDispatch(reactApplicationContext.currentActivity)
+    disableReaderMode()
   }
 
   override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
   }
 
   override fun onNewIntent(intent: Intent) {
-    if (!isReading) return
+  }
 
+  // enableForegroundDispatch only prioritizes intent delivery to this app - it does NOT
+  // exclusively claim the NFC controller, so Android's own system tag-dispatch can still
+  // poll/interrupt the chip mid-handshake (surfacing as spurious TagLostException/IOException
+  // during the multi-round-trip BAC/PACE exchange). enableReaderMode does claim it exclusively,
+  // skips the Activity intent round-trip, and lets us relax the presence-check polling interval.
+  private val readerCallback = NfcAdapter.ReaderCallback { tag ->
     sendEvent("onTagDiscovered", null)
 
-    if (NfcAdapter.ACTION_TECH_DISCOVERED == intent.action) {
-      val tag = intent.extras!!.getParcelable<Tag>(NfcAdapter.EXTRA_TAG)
+    if (listOf(*tag.techList).contains("android.nfc.tech.IsoDep")) {
+      try {
+        val result = nfcPassportReader.readPassport(IsoDep.get(tag), bacKey!!, includeImages)
 
-      if (listOf(*tag!!.techList).contains("android.nfc.tech.IsoDep")) {
-        CoroutineScope(Dispatchers.IO).launch {
-          try {
-            val result = nfcPassportReader.readPassport(IsoDep.get(tag), bacKey!!, includeImages)
+        val map = result.serializeToMap()
+        val reactMap = jsonToReactMap.convertJsonToMap(JSONObject(map))
 
-            val map = result.serializeToMap()
-            val reactMap = jsonToReactMap.convertJsonToMap(JSONObject(map))
-
-            _promise?.resolve(reactMap)
-          } catch (e: Exception) {
-            reject(e)
-          }
+        resolve(reactMap)
+      } catch (e: CardServiceException) {
+        // Passive ISO14443 coupling is fragile - a slight shift mid-read breaks the RF link
+        // and is recoverable, so stay in reader mode and wait for the tag to be re-presented
+        // instead of aborting the whole scan on the first hiccup. Bounded so a genuinely
+        // unreadable card still fails instead of hanging forever.
+        retryCount++
+        if (retryCount < MAX_RETRIES) {
+          sendEvent("onReadRetry", e.message ?: "Tag was lost")
+        } else {
+          reject(e)
         }
-      } else {
-        reject(Exception("Tag tech is not IsoDep"))
+      } catch (e: Exception) {
+        reject(e)
       }
+    } else {
+      reject(Exception("Tag tech is not IsoDep"))
     }
+  }
+
+  private fun enableReaderMode() {
+    val activity = reactApplicationContext.currentActivity
+    if (activity == null) {
+      reject(Exception("CurrentActivity is null"))
+      return
+    }
+
+    val options = Bundle().apply {
+      // The presence check isn't just a passive poll - it reselects the tag at the ISO14443-3
+      // layer, which tears down the ISO14443-4/secure-messaging session mid-handshake and
+      // surfaces as a spurious "Tag was lost" even though the chip never physically left.
+      // Push it well past our whole read session so it never fires mid-transaction.
+      putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 30000)
+    }
+
+    adapter?.enableReaderMode(
+      activity,
+      readerCallback,
+      NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+        NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+      options
+    )
+  }
+
+  private fun disableReaderMode() {
+    reactApplicationContext.currentActivity?.let { adapter?.disableReaderMode(it) }
   }
 
   private fun sendEvent(eventName: String, params: Any?) {
@@ -169,9 +166,17 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
       .emit(eventName, params)
   }
 
+  private fun resolve(map: WritableMap) {
+    isReading = false
+    bacKey = null
+    disableReaderMode()
+    _promise?.resolve(map)
+  }
+
   private fun reject(e: Exception) {
     isReading = false
     bacKey = null
+    disableReaderMode()
     _promise?.reject(e)
   }
 
@@ -211,6 +216,8 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
         )
 
         isReading = true
+        retryCount = 0
+        enableReaderMode()
       } ?: run {
         reject(Exception("BAC key is null"))
       }
@@ -223,6 +230,7 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
   fun stopReading() {
     isReading = false
     bacKey = null
+    disableReaderMode()
   }
 
   @ReactMethod
@@ -250,5 +258,6 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
 
   companion object {
     const val NAME = "NfcPassportReader"
+    private const val MAX_RETRIES = 8
   }
 }
