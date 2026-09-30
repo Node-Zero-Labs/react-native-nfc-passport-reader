@@ -11,6 +11,7 @@ import android.nfc.NfcAdapter
 import android.nfc.tech.IsoDep
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
@@ -85,6 +86,7 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
   }
 
   override fun onHostPause() {
+    Log.d(TAG, "onHostPause: disabling reader mode")
     disableReaderMode()
   }
 
@@ -104,6 +106,7 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
   // during the multi-round-trip BAC/PACE exchange). enableReaderMode does claim it exclusively,
   // skips the Activity intent round-trip, and lets us relax the presence-check polling interval.
   private val readerCallback = NfcAdapter.ReaderCallback { tag ->
+    Log.d(TAG, "readerCallback: tag discovered, techList=${tag.techList.joinToString()}")
     sendEvent("onTagDiscovered", null)
 
     if (listOf(*tag.techList).contains("android.nfc.tech.IsoDep")) {
@@ -140,6 +143,19 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
       return
     }
 
+    // adapter is resolved once at module construction time (see the field
+    // declaration above) - if that ever raced ahead of the NFC service being
+    // ready, this would otherwise silently no-op below, leaving the OS's
+    // default tag dispatch (not our reader-mode callback) to handle the next
+    // tap with no error surfaced anywhere.
+    val currentAdapter = adapter ?: NfcAdapter.getDefaultAdapter(reactApplicationContext)
+    if (currentAdapter == null) {
+      Log.w(TAG, "enableReaderMode: no NfcAdapter available")
+      reject(Exception("No NFC adapter available on this device"))
+      return
+    }
+    adapter = currentAdapter
+
     val options = Bundle().apply {
       // The presence check isn't just a passive poll - it reselects the tag at the ISO14443-3
       // layer, which tears down the ISO14443-4/secure-messaging session mid-handshake and
@@ -148,17 +164,21 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
       putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 30000)
     }
 
-    adapter?.enableReaderMode(
+    currentAdapter.enableReaderMode(
       activity,
       readerCallback,
       NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
         NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
       options
     )
+    Log.d(TAG, "enableReaderMode: reader mode enabled on activity=${activity.localClassName}")
   }
 
   private fun disableReaderMode() {
-    reactApplicationContext.currentActivity?.let { adapter?.disableReaderMode(it) }
+    reactApplicationContext.currentActivity?.let {
+      adapter?.disableReaderMode(it)
+      Log.d(TAG, "disableReaderMode: reader mode disabled")
+    }
   }
 
   private fun sendEvent(eventName: String, params: Any?) {
@@ -258,6 +278,7 @@ class NfcPassportReaderModule(reactContext: ReactApplicationContext) :
 
   companion object {
     const val NAME = "NfcPassportReader"
+    private const val TAG = "NfcPassportReaderModule"
     private const val MAX_RETRIES = 8
   }
 }
